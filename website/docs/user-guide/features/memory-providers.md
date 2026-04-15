@@ -1,12 +1,12 @@
 ---
 sidebar_position: 4
 title: "Memory Providers"
-description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover"
+description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory, Pallium"
 ---
 
 # Memory Providers
 
-Hermes Agent ships with 7 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
+Hermes Agent ships with 8 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
 
 ## Quick Start
 
@@ -16,11 +16,13 @@ hermes memory status     # check what's active
 hermes memory off        # disable external provider
 ```
 
+You can also select the active memory provider via `hermes plugins` → Provider Plugins → Memory Provider.
+
 Or set manually in `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
-  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover
+  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory, pallium
 ```
 
 ## How It Works
@@ -263,12 +265,12 @@ echo "MEM0_API_KEY=your-key" >> ~/.hermes/.env
 
 ### Hindsight
 
-Long-term memory with knowledge graph, entity resolution, and multi-strategy retrieval. The `hindsight_reflect` tool provides cross-memory synthesis that no other provider offers.
+Long-term memory with knowledge graph, entity resolution, and multi-strategy retrieval. The `hindsight_reflect` tool provides cross-memory synthesis that no other provider offers. Automatically retains full conversation turns (including tool calls) with session-level document tracking.
 
 | | |
 |---|---|
 | **Best for** | Knowledge graph-based recall with entity relationships |
-| **Requires** | Cloud: `pip install hindsight-client` + API key. Local: `pip install hindsight` + LLM key |
+| **Requires** | Cloud: API key from [ui.hindsight.vectorize.io](https://ui.hindsight.vectorize.io). Local: LLM API key (OpenAI, Groq, OpenRouter, etc.) |
 | **Data storage** | Hindsight Cloud or local embedded PostgreSQL |
 | **Cost** | Hindsight pricing (cloud) or free (local) |
 
@@ -282,13 +284,25 @@ hermes config set memory.provider hindsight
 echo "HINDSIGHT_API_KEY=your-key" >> ~/.hermes/.env
 ```
 
+The setup wizard installs dependencies automatically and only installs what's needed for the selected mode (`hindsight-client` for cloud, `hindsight-all` for local). Requires `hindsight-client >= 0.4.22` (auto-upgraded on session start if outdated).
+
+**Local mode UI:** `hindsight-embed -p hermes ui start`
+
 **Config:** `$HERMES_HOME/hindsight/config.json`
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `mode` | `cloud` | `cloud` or `local` |
 | `bank_id` | `hermes` | Memory bank identifier |
-| `budget` | `mid` | Recall thoroughness: `low` / `mid` / `high` |
+| `recall_budget` | `mid` | Recall thoroughness: `low` / `mid` / `high` |
+| `memory_mode` | `hybrid` | `hybrid` (context + tools), `context` (auto-inject only), `tools` (tools only) |
+| `auto_retain` | `true` | Automatically retain conversation turns |
+| `auto_recall` | `true` | Automatically recall memories before each turn |
+| `retain_async` | `true` | Process retain asynchronously on the server |
+| `tags` | — | Tags applied when storing memories |
+| `recall_tags` | — | Tags to filter on recall |
+
+See [plugin README](https://github.com/NousResearch/hermes-agent/blob/main/plugins/memory/hindsight/README.md) for the full configuration reference.
 
 ---
 
@@ -382,6 +396,110 @@ hermes config set memory.provider byterover
 
 ---
 
+### Supermemory
+
+Semantic long-term memory with profile recall, semantic search, explicit memory tools, and session-end conversation ingest via the Supermemory graph API.
+
+| | |
+|---|---|
+| **Best for** | Semantic recall with user profiling and session-level graph building |
+| **Requires** | `pip install supermemory` + [API key](https://supermemory.ai) |
+| **Data storage** | Supermemory Cloud |
+| **Cost** | Supermemory pricing |
+
+**Tools:** `supermemory_store` (save explicit memories), `supermemory_search` (semantic similarity search), `supermemory_forget` (forget by ID or best-match query), `supermemory_profile` (persistent profile + recent context)
+
+**Setup:**
+```bash
+hermes memory setup    # select "supermemory"
+# Or manually:
+hermes config set memory.provider supermemory
+echo 'SUPERMEMORY_API_KEY=***' >> ~/.hermes/.env
+```
+
+**Config:** `$HERMES_HOME/supermemory.json`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `container_tag` | `hermes` | Container tag used for search and writes. Supports `{identity}` template for profile-scoped tags. |
+| `auto_recall` | `true` | Inject relevant memory context before turns |
+| `auto_capture` | `true` | Store cleaned user-assistant turns after each response |
+| `max_recall_results` | `10` | Max recalled items to format into context |
+| `profile_frequency` | `50` | Include profile facts on first turn and every N turns |
+| `capture_mode` | `all` | Skip tiny or trivial turns by default |
+| `search_mode` | `hybrid` | Search mode: `hybrid`, `memories`, or `documents` |
+| `api_timeout` | `5.0` | Timeout for SDK and ingest requests |
+
+**Environment variables:** `SUPERMEMORY_API_KEY` (required), `SUPERMEMORY_CONTAINER_TAG` (overrides config).
+
+**Key features:**
+- Automatic context fencing — strips recalled memories from captured turns to prevent recursive memory pollution
+- Session-end conversation ingest for richer graph-level knowledge building
+- Profile facts injected on first turn and at configurable intervals
+- Trivial message filtering (skips "ok", "thanks", etc.)
+- **Profile-scoped containers** — use `{identity}` in `container_tag` (e.g. `hermes-{identity}` → `hermes-coder`) to isolate memories per Hermes profile
+- **Multi-container mode** — enable `enable_custom_container_tags` with a `custom_containers` list to let the agent read/write across named containers. Automatic operations (sync, prefetch) stay on the primary container.
+
+<details>
+<summary>Multi-container example</summary>
+
+```json
+{
+  "container_tag": "hermes",
+  "enable_custom_container_tags": true,
+  "custom_containers": ["project-alpha", "shared-knowledge"],
+  "custom_container_instructions": "Use project-alpha for coding context."
+}
+```
+
+</details>
+
+**Support:** [Discord](https://supermemory.link/discord) · [support@supermemory.com](mailto:support@supermemory.com)
+
+---
+
+### Pallium
+
+Local-first memory sidecar with automatic fact extraction, hybrid retrieval (lexical + vector RRF), and evidence provenance. Multilingual by design — memory is preserved in the original language and cross-language recall works natively.
+
+| | |
+|---|---|
+| **Best for** | Local-only memory with automatic extraction, multilingual agents, long autonomous runs |
+| **Requires** | Running Pallium server (`pip install` from source) + LLM API key for extraction |
+| **Data storage** | Local SQLite + local vector index |
+| **Cost** | Free |
+
+**Tools:** `pallium_query` (search decisions, facts, checkpoints), `pallium_remember` (store explicit facts/decisions)
+
+**Setup:**
+```bash
+# Start Pallium server first (see https://github.com/rotemhermon/pallium)
+python -m app.run serve --host 127.0.0.1 --port 8000
+
+# Then configure Hermes
+hermes memory setup    # select "pallium"
+# Or manually:
+hermes config set memory.provider pallium
+```
+
+**Config:** `$HERMES_HOME/pallium.json`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `base_url` | `http://localhost:8000` | Pallium server URL |
+| `actor_ref` | `hermes-user` | Stable user identifier for cross-session memory scoping |
+| `container_ref` | `hermes` | Memory container identifier |
+
+**How memory builds automatically:**
+
+Every conversation turn is ingested and processed by two parallel extraction packages:
+- **Work continuity** — decisions, investigation outcomes, task checkpoints
+- **Factual recall** — names, dates, preferences, events, relationships, consolidated by subject across sessions
+
+The agent doesn't need to decide what to remember — extraction is automatic and runs in the background.
+
+---
+
 ## Provider Comparison
 
 | Provider | Storage | Cost | Tools | Dependencies | Unique Feature |
@@ -393,13 +511,15 @@ hermes config set memory.provider byterover
 | **Holographic** | Local | Free | 2 | None | HRR algebra + trust scoring |
 | **RetainDB** | Cloud | $20/mo | 5 | `requests` | Delta compression |
 | **ByteRover** | Local/Cloud | Free/Paid | 3 | `brv` CLI | Pre-compression extraction |
+| **Supermemory** | Cloud | Paid | 4 | `supermemory` | Context fencing + session graph ingest + multi-container |
+| **Pallium** | Local | Free | 2 | `httpx` + Pallium server | Hybrid retrieval + evidence provenance + multilingual |
 
 ## Profile Isolation
 
 Each provider's data is isolated per [profile](/docs/user-guide/profiles):
 
 - **Local storage providers** (Holographic, ByteRover) use `$HERMES_HOME/` paths which differ per profile
-- **Config file providers** (Honcho, Mem0, Hindsight) store config in `$HERMES_HOME/` so each profile has its own credentials
+- **Config file providers** (Honcho, Mem0, Hindsight, Supermemory) store config in `$HERMES_HOME/` so each profile has its own credentials
 - **Cloud providers** (RetainDB) auto-derive profile-scoped project names
 - **Env var providers** (OpenViking) are configured via each profile's `.env` file
 
